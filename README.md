@@ -793,7 +793,7 @@ from samples.wanderbricks.properties a
 join samples.wanderbricks.properties b
 on a.property_id < b.property_id
 order by distance_km asc
----
+```
 
 **Explanation:** 
 Uses the Haversine formula to compute great‑circle distance between two latitude/longitude points on Earth.
@@ -803,7 +803,7 @@ Sorting by distance_km surfaces extremely close listings — useful for detectin
 
 <img width="930" height="332" alt="wanderbricks_Q20pt1" src="https://github.com/user-attachments/assets/b49bf297-830d-4fd2-a252-a05b24cef8e4" />
 
-### 🔹 Q22: Suspicious Booking Amounts — Payment vs. Booking Total Mismatch
+### 🔹 Q21: Suspicious Booking Amounts — Payment vs. Booking Total Mismatch
 
 Flags bookings where:
 
