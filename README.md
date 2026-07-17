@@ -109,25 +109,8 @@ hosts ──► properties ──► destinations ──► countries      │
 | `reviews` | Quality | property_id, rating, comment |
 | `customer_support_logs` | Support | ticket_id, support_agent_id, messages[] |
 
-> Full DDL with column types, descriptions, and domain context is in [`schema/wanderbricks_schema.sql`](schema/wanderbricks_schema.sql).
-
 ---
 
-## 📂 Dataset
-The dataset models a vacation rental marketplace (think Airbnb/VRBO) and includes:
-- **Bookings** — reservation records, status, dates, amounts
-- **Booking Updates** — event-driven mutations logged after initial booking
-- **Properties** — listing registry with type, host, and destination
-- **Destinations & Countries** — geographic reference tables
-- **Amenities & Property Amenities** — feature assignments per listing
-- **Property Images** — image records with primary image flag
-- **Users & Hosts** — guest accounts and host profiles
-- **Payments** — financial transactions per booking
-- **Clickstream & Page Views** — user engagement and device/referral signals
-- **Customer Support Logs** — support tickets with nested message arrays
-- **Reviews** — guest ratings and freetext comments
-
----
 
 ## 📈 SQL Queries & Explanations
 
@@ -604,39 +587,31 @@ Unnests the `messages[]` array and returns:
 **Purpose:** Power support dashboards, SLA tracking, and agent handoff summaries with the latest context per ticket.
 
 ```sql
-WITH unnested AS (
-    SELECT created_at, EXPLODE(messages) AS message,
-           support_agent_id, ticket_id, user_id
-    FROM samples.wanderbricks.customer_support_logs
-),
-message_conversion AS (
-    SELECT created_at, support_agent_id, ticket_id, user_id,
-           CAST(message AS STRING) AS message
-    FROM unnested
-),
-date_extract AS (
-    SELECT created_at, message, support_agent_id, ticket_id, user_id,
-           REGEXP_SUBSTR(message, '[0-9]{4}-[0-9]{2}-[0-9]{2}') AS real_date
-    FROM message_conversion
-),
-date_rank AS (
-    SELECT support_agent_id, message, ticket_id, user_id, real_date,
-           ROW_NUMBER() OVER (PARTITION BY ticket_id ORDER BY real_date DESC) AS most_recent_date
-    FROM date_extract
-)
-SELECT DISTINCT support_agent_id, message, ticket_id, real_date
-FROM date_rank
-WHERE most_recent_date = 1
-ORDER BY ticket_id ASC;
+select
+support_agent_id
+,cast(message as string) as message
+,ticket_id
+,regexp_substr(cast(message as string), '[0-9]{4}-[0-9]{2}-[0-9]{2}') as real_date
+from (
+select
+support_agent_id
+,ticket_id
+,user_id
+,explode(messages) as message
+from samples.wanderbricks.customer_support_logs
+) base
+qualify row_number() over(partition by ticket_id order by regexp_substr(cast(message as string), '[0-9]{4}-[0-9]{2}-[0-9]{2}') desc) = 1
+order by ticket_id asc
 ```
 
 **Explanation:** Four-CTE pipeline — `EXPLODE()` flattens the nested messages array into rows, `CAST AS STRING` enables regex parsing, `REGEXP_SUBSTR` extracts the embedded ISO date, and `ROW_NUMBER()` isolates the latest message per ticket before the final filter.
 
-<!-- Add screenshot here -->
+<img width="910" height="357" alt="wanderbricks_Q15" src="https://github.com/user-attachments/assets/c56adf01-425f-440d-bd49-bb29bbddd759" />
+
 
 ---
 
-### 🔹 Q16: Support Message Sentiment Analysis
+### 🔹 Q16: Support Message Sentiment Analysis 
 Extracts from each message string:
 - `reporter` — who sent the message (agent or user)
 - `mood` — sentiment label (angry, caring, helpful, etc.)
@@ -644,33 +619,29 @@ Extracts from each message string:
 **Purpose:** Monitor emotional tone of support interactions to trigger escalations and measure agent quality.
 
 ```sql
-SELECT
-    support_agent_id,
-    CAST(message AS STRING)                                               AS message,
-    ticket_id,
-    REGEXP_SUBSTR(CAST(message AS STRING), '[0-9]{4}-[0-9]{2}-[0-9]{2}') AS real_date,
-    REGEXP_EXTRACT(
-        CAST(message AS STRING),
-        ',\\s*([^,]+),\\s*[^,]+,\\s*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}', 1
-    ) AS reporter,
-    REGEXP_EXTRACT(
-        CAST(message AS STRING),
-        ',\\s*([^,]+),\\s*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}', 1
-    ) AS mood
-FROM (
-    SELECT support_agent_id, ticket_id, user_id, EXPLODE(messages) AS message
-    FROM samples.wanderbricks.customer_support_logs
-) AS base
-QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY ticket_id
-    ORDER BY REGEXP_SUBSTR(CAST(message AS STRING), '[0-9]{4}-[0-9]{2}-[0-9]{2}') DESC
-) = 1
-ORDER BY ticket_id ASC;
+select
+support_agent_id
+,cast(message as string) as message
+,ticket_id
+,regexp_substr(cast(message as string), '[0-9]{4}-[0-9]{2}-[0-9]{2}') as real_date
+,regexp_extract(CAST(message as string), ',\\s*([^,]+),\\s*[^,]+,\\s*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}', 1) as reporter
+,regexp_extract(cast(message as string), ',\\s*([^,]+),\\s*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}', 1) as mood
+from (
+select
+support_agent_id
+,ticket_id
+,user_id
+,explode(messages) as message
+from samples.wanderbricks.customer_support_logs
+) base
+qualify row_number() over(partition by ticket_id order by regexp_substr(cast(message as string), '[0-9]{4}-[0-9]{2}-[0-9]{2}') desc) = 1
+order by ticket_id asc
 ```
 
 **Explanation:** Two `REGEXP_EXTRACT` calls target different positional fields within the serialized message struct string. `QUALIFY` filters to the most recent message per ticket without a subquery wrapper — a Databricks SQL shorthand for post-window filtering.
 
-<!-- Add screenshot here -->
+<img width="1067" height="372" alt="wanderbricks_Q16" src="https://github.com/user-attachments/assets/407e0488-036e-4f86-8b40-bf1389bf85aa" />
+
 
 ---
 
@@ -681,39 +652,51 @@ Calculates:
 **Purpose:** Measure SLA compliance and resolution time benchmarking across support agents.
 
 ```sql
-WITH exploded AS (
-    SELECT support_agent_id, ticket_id,
-           CAST(message AS STRING) AS message,
-           REGEXP_SUBSTR(CAST(message AS STRING), '[0-9]{4}-[0-9]{2}-[0-9]{2}') AS real_date
-    FROM samples.wanderbricks.customer_support_logs
-    LATERAL VIEW EXPLODE(messages) AS message
+with exploded as (
+select
+support_agent_id
+,ticket_id
+,cast(message as string) as message
+,regexp_substr(cast(message as string), '[0-9]{4}-[0-9]{2}-[0-9]{2}') as real_date
+from samples.wanderbricks.customer_support_logs
+lateral view explode(messages) as message
 ),
-ranked AS (
-    SELECT support_agent_id, ticket_id, message, real_date,
-           ROW_NUMBER() OVER (PARTITION BY ticket_id ORDER BY real_date ASC)  AS first_message,
-           ROW_NUMBER() OVER (PARTITION BY ticket_id ORDER BY real_date DESC) AS last_message
-    FROM exploded
+ranked as (
+select
+support_agent_id
+,ticket_id
+,message
+,real_date
+,row_number() over (partition by ticket_id order by real_date asc) as first_message
+,row_number() over (partition by ticket_id order by real_date desc) as last_message
+from exploded
 ),
-date_extract AS (
-    SELECT ticket_id,
-           MAX(CASE WHEN first_message = 1 THEN message END) AS first_message,
-           MAX(CASE WHEN last_message  = 1 THEN message END) AS last_message,
-           MIN(real_date) AS first_date,
-           MAX(real_date) AS last_date
-    FROM ranked
-    GROUP BY ticket_id
+date_extract as (
+select
+ticket_id
+,max(case when first_message = 1 then message end) as first_message
+,max(case when last_message = 1 then message end) as last_message
+,min(real_date) as first_date
+,max(real_date) as last_date
+from ranked
+group by ticket_id
 )
-SELECT
-    a.ticket_id, b.messages, a.first_date, a.last_date,
-    DATEDIFF(a.last_date, a.first_date) AS duration
-FROM date_extract AS a
-JOIN samples.wanderbricks.customer_support_logs AS b ON a.ticket_id = b.ticket_id
-ORDER BY a.ticket_id;
+select 
+a.ticket_id
+,b.messages as message
+,first_date
+,last_date
+,date_diff(a.last_date, a.first_date) as duration
+from date_extract a
+join samples.wanderbricks.customer_support_logs b
+on a.ticket_id = b.ticket_id
+order by ticket_id
 ```
 
 **Explanation:** Dual `ROW_NUMBER()` window functions assign first and last message ranks simultaneously. `MAX(CASE WHEN)` then pivots the ranked rows into a single-row-per-ticket summary before `DATEDIFF` computes the conversation span.
 
-<!-- Add screenshot here -->
+<img width="946" height="366" alt="wanderbricks_Q17" src="https://github.com/user-attachments/assets/b0d1139d-d5ed-441b-a6af-de2526fd1f5c" />
+
 
 ---
 
@@ -725,28 +708,27 @@ Ranks properties within each destination:
 **Purpose:** Power "Top Picks" features, host recognition programs, and destination marketing pages.
 
 ```sql
-SELECT
-    a.property_id,
-    a.title,
-    a.property_type,
-    b.destination,
-    c.rating,
-    ROW_NUMBER() OVER (
-        PARTITION BY b.destination
-        ORDER BY c.rating DESC
-    ) AS rank
-FROM samples.wanderbricks.properties   AS a
-JOIN samples.wanderbricks.destinations AS b
-    ON a.destination_id = b.destination_id
-JOIN samples.wanderbricks.reviews      AS c
-    ON a.property_id = c.property_id
-QUALIFY rank <= 3
-ORDER BY b.destination ASC, rank ASC;
+select 
+a.property_id
+,a.title
+,a.property_type
+,b.destination
+,c.rating
+,row_number() over(partition by destination order by rating desc) as rank
+from 
+samples.wanderbricks.properties a
+join samples.wanderbricks.destinations b
+on a.destination_id = b.destination_id
+join samples.wanderbricks.reviews c
+on a.property_id = c.property_id
+qualify rank <= 3
+order by destination asc
 ```
 
 **Explanation:** `ROW_NUMBER()` assigns a unique sequential rank within each destination partition — unlike `RANK()`, it never ties, guaranteeing exactly 3 rows per destination. `QUALIFY rank <= 3` filters post-window without a subquery.
 
-<!-- Add screenshot here -->
+<img width="650" height="362" alt="wanderbricks_Q18" src="https://github.com/user-attachments/assets/ed348d68-2c8f-4daf-8908-31e1b41862f6" />
+
 
 ---
 
@@ -758,31 +740,117 @@ Joins reviews under 3 stars to properties and destinations to:
 **Purpose:** Detect systemic quality issues — a comment that recurs many times signals a structural problem, not a one-off complaint.
 
 ```sql
-SELECT
-    a.property_id,
-    a.title,
-    a.property_type,
-    b.destination,
-    c.rating,
-    c.comment,
-    COUNT(*) OVER (
-        PARTITION BY c.comment, b.destination, a.title
-    ) AS ratings_count
-FROM samples.wanderbricks.properties   AS a
-JOIN samples.wanderbricks.destinations AS b
-    ON a.destination_id = b.destination_id
-JOIN samples.wanderbricks.reviews      AS c
-    ON a.property_id = c.property_id
-WHERE c.rating IS NOT NULL
-  AND c.rating < 3
-ORDER BY a.title ASC, b.destination ASC, a.property_id ASC, c.rating ASC;
+select 
+a.property_id
+,a.title
+,a.property_type
+,b.destination
+,c.rating
+,c.comment
+,count(*) over(partition by comment, b.destination, a.title) as ratings_count
+from 
+samples.wanderbricks.properties a
+join samples.wanderbricks.destinations b
+on a.destination_id = b.destination_id
+join samples.wanderbricks.reviews c
+on a.property_id = c.property_id
+where c.rating is not null
+and c.rating < 3
+order by title, destination, a.property_id, rating asc
 ```
 
 **Explanation:** `COUNT(*) OVER (PARTITION BY comment, destination, title)` adds a frequency score to every row without collapsing them — high `ratings_count` values surface recurring complaints that should be prioritized for host coaching or listing removal.
 
-<!-- Add screenshot here -->
+<img width="943" height="366" alt="wanderbricks_Q19" src="https://github.com/user-attachments/assets/44be83f3-40bb-461e-8ccd-81c3b2d352b3" />
 
+### 🔹 Q20: Property Distance Check (Haversine Formula)
+
+Computes:
+
+- Distance in kilometers between every pair of properties  
+- Using the Haversine spherical distance formula  
+- Sorted from nearest to farthest
+
+**Purpose:**  
+Identify clusters of nearby properties for dynamic pricing, neighborhood grouping, map-based search features, and geo‑deduplication of duplicate listings.
+
+```sql
+select
+a.property_id as property_id_1
+,b.property_id as property_id_2
+,a.title as property_title_1
+,b.title as property_title_2
+,a.property_latitude as lat1
+,a.property_longitude as lon1
+,b.property_latitude as lat2
+,b.property_longitude as lon2
+,round(6371 * 2 * asin(sqrt(power(sin(radians((b.property_latitude - a.property_latitude) / 2)), 2) 
++ cos(radians(a.property_latitude)) 
+* cos(radians(b.property_latitude)) 
+* power(sin(radians((b.property_longitude - a.property_longitude) / 2)), 2)
+)), 2) as distance_km
+from samples.wanderbricks.properties a
+join samples.wanderbricks.properties b
+on a.property_id < b.property_id
+order by distance_km asc
 ---
+
+**Explanation:** 
+Uses the Haversine formula to compute great‑circle distance between two latitude/longitude points on Earth.
+The a.property_id < b.property_id condition prevents duplicate pairings (A–B and B–A).
+Sorting by distance_km surfaces extremely close listings — useful for detecting duplicates, multi‑unit buildings, or hyper‑dense markets.
+
+
+<img width="930" height="332" alt="wanderbricks_Q20pt1" src="https://github.com/user-attachments/assets/b49bf297-830d-4fd2-a252-a05b24cef8e4" />
+
+### 🔹 Q22: Suspicious Booking Amounts — Payment vs. Booking Total Mismatch
+
+Flags bookings where:
+
+- `bookings.total_amount` does **not** match  
+- The sum of actual payments recorded in `payments.amount`
+
+**Purpose:**  
+Detect billing inconsistencies, partial payments, overcharges, undercharges, and potential fraud or reconciliation errors.
+
+```sql
+with base as (
+select 
+a.booking_id
+,check_in
+,check_out
+,format_number(total_amount,'#.##') as booking_payment
+,abs(round(amount,2)) as actual_payment
+-- ,payment_method
+from samples.wanderbricks.bookings a
+join samples.wanderbricks.payments b
+on a.booking_id = b.booking_id
+),
+differences as (
+select 
+*
+,round(try_subtract(booking_payment, actual_payment),2) price_difference
+from base
+where try_subtract(booking_payment, actual_payment)<> 0
+)
+select 
+*
+,case when price_difference > 0 then 'increase'
+when price_difference < 0 then 'decrease'
+else 'none' end as price_difference
+from differences
+order by booking_id asc
+```
+
+**Explanation:**
+The base CTE aligns booking totals with actual payment rows.
+try_subtract() safely computes the difference even when formatting or type mismatches occur.
+Any non‑zero difference indicates a suspicious discrepancy — either overpayment (increase) or underpayment (decrease).
+This query is essential for financial audits, chargeback investigations, and monthly reconciliation workflows.
+
+<img width="841" height="407" alt="wanderbricks_Q20" src="https://github.com/user-attachments/assets/9d82f5f4-8ae2-413e-a8f4-39ddac362694" />
+
+
 
 ## 📊 Key Insights
 - Status mismatches between bookings and booking_updates signal ETL sync gaps that need pipeline fixes
@@ -803,10 +871,9 @@ ORDER BY a.title ASC, b.destination ASC, a.property_id ASC, c.rating ASC;
 - Conditional aggregation and pivot patterns
 - `QUALIFY` clause for post-window filtering
 - Business-driven analytics across 7 analytical domains
-
 ---
 
-*Built with Apache Spark SQL on Databricks | July 2026*
+*I Built this with Apache Spark SQL on Databricks | July 2026*
 
 
 
