@@ -131,27 +131,28 @@ The dataset models a vacation rental marketplace (think Airbnb/VRBO) and include
 
 ## 📈 SQL Queries & Explanations
 
-### 🔹 Q1: Booking Status Consistency
+### 🔹 Q1: Booking Status Consistency Find bookings where bookings.status and booking_updates.status disagree.
 Identifies bookings where:
 - `bookings.status` and `booking_updates.status` disagree
 
 **Purpose:** Detect data pipeline sync failures or race conditions between the source-of-truth table and the event log.
 
 ```sql
-SELECT
-    a.booking_id,
-    a.status                AS bookings_status,
-    b.status                AS booking_updates_status
-FROM samples.wanderbricks.bookings        AS a
-INNER JOIN samples.wanderbricks.booking_updates AS b
-    ON a.booking_id = b.booking_id
-WHERE a.status != b.status
-ORDER BY a.booking_id;
+select
+a.booking_id
+,a.status
+,b.status
+from samples.wanderbricks.bookings a
+inner join samples.wanderbricks.booking_updates b
+on a.booking_id = b.booking_id
+where a.status != b.status
+order by a.booking_id asc
 ```
 
 **Explanation:** Uses an INNER JOIN to compare status values across both tables. Any row returned signals a mismatch that needs reconciliation. An empty result = tables are in sync ✅
 
-<!-- Add screenshot here -->
+<<img width="301" height="368" alt="wanderbricks_Q1" src="https://github.com/user-attachments/assets/d557ab44-ecc4-4b95-8ac7-a589ef21c1a1" />
+>
 
 ---
 
@@ -163,21 +164,21 @@ Calculates:
 **Purpose:** Understand destination appeal and inform pricing tiers and marketing campaigns.
 
 ```sql
-SELECT
-    c.destination,
-    ROUND(AVG(DATEDIFF(a.check_out, a.check_in)), 2) AS avg_stay_length
-FROM samples.wanderbricks.booking_updates  AS a
-JOIN samples.wanderbricks.properties       AS b
-    ON a.property_id = b.property_id
-JOIN samples.wanderbricks.destinations     AS c
-    ON b.destination_id = c.destination_id
-GROUP BY c.destination
-ORDER BY avg_stay_length DESC;
+select
+c.destination 
+,round(avg(date_diff(a.check_out, a.check_in)),2) as avg_stay_length
+from samples.wanderbricks.booking_updates a
+join samples.wanderbricks.properties b
+on a.property_id = b.property_id
+join samples.wanderbricks.destinations c
+on b.destination_id = c.destination_id
+group by c.destination
+order by avg_stay_length desc
 ```
 
 **Explanation:** Uses `DATEDIFF(check_out, check_in)` to compute nights per booking, then averages across all bookings per destination via a 3-table join chain.
 
-<!-- Add screenshot here -->
+<img width="276" height="365" alt="wanderbricks_Q2" src="https://github.com/user-attachments/assets/5fa1f6d5-0208-4396-b8c6-bfd25744da29" />
 
 ---
 
@@ -190,34 +191,36 @@ Calculates per month (completed bookings only):
 **Purpose:** Audit post-booking price adjustments and measure revenue reconciliation gaps month over month.
 
 ```sql
-WITH main AS (
-    SELECT
-        DATE_FORMAT(a.check_in, 'yyyy-MM')   AS month,
-        b.status,
-        SUM(a.total_amount)                  AS total_amount,
-        SUM(b.total_amount)                  AS total_amount_updates
-    FROM samples.wanderbricks.bookings        AS a
-    JOIN samples.wanderbricks.booking_updates AS b
-        ON a.booking_id = b.booking_id
-    WHERE b.status = 'completed'
-    GROUP BY ALL
-    ORDER BY month DESC
-),
-solution AS (
-    SELECT
-        month,
-        status,
-        FORMAT_NUMBER(total_amount,         '$###,###.##') AS total_amount,
-        FORMAT_NUMBER(total_amount_updates, '$###,###.##') AS total_amount_updates,
-        FORMAT_NUMBER(total_amount_updates - total_amount, '$###,###.##') AS price_diff
-    FROM main
+with main as(
+select 
+date_format(a.check_in,'yyyy-MM') as month
+,sum(a.total_amount) as total_amount
+,sum(b.total_amount) as total_amount_updates
+,b.status
+from samples.wanderbricks.bookings a
+join samples.wanderbricks.booking_updates b
+on a.booking_id = b.booking_id
+where b.status = 'completed'
+group by all
+order by month desc
 )
-SELECT * FROM solution;
+,
+solution (
+select
+month
+,status
+,format_number(total_amount, '$###,###.##') as total_amount
+,format_number(total_amount_updates, '$###,###.##') as total_amount_updates
+,format_number(total_amount_updates - total_amount, '$###,###.##') as price_diff
+from main
+)
+select * from solution
 ```
 
 **Explanation:** Two-CTE pattern — `main` aggregates raw sums by month, `solution` formats them as currency strings and surfaces the delta. A positive `price_diff` = upward adjustment; negative = discount or correction applied post-booking.
 
-<!-- Add screenshot here -->
+<img width="543" height="360" alt="wanderbricks_Q3" src="https://github.com/user-attachments/assets/c22c11ac-9fd4-43be-a53f-cac858c95969" />
+
 
 ---
 
@@ -229,49 +232,27 @@ Calculates:
 **Purpose:** Understand which property types attract solo travelers vs. large groups for capacity planning and pricing tiers.
 
 ```sql
-SELECT
-    b.property_id,
-    COUNT(a.booking_id)  AS bookings,
-    a.guests_count       AS guest_count,
-    b.property_type
-FROM samples.wanderbricks.booking_updates AS a
-JOIN samples.wanderbricks.properties      AS b
-    ON a.property_id = b.property_id
-GROUP BY ALL
-ORDER BY guest_count DESC;
+select
+b.property_id
+,count(a.booking_id) as bookings
+,a.guests_count as guest_count
+,b.property_type
+from samples.wanderbricks.booking_updates a
+join samples.wanderbricks.properties b
+on a.property_id = b.property_id
+group by all
+order by guest_count desc
 ```
 
 **Explanation:** Uses `GROUP BY ALL` (Databricks shorthand) to group on all non-aggregated columns. `COUNT(booking_id)` tallies bookings per property-type and guest-count combination.
 
-<!-- Add screenshot here -->
+<img width="437" height="361" alt="wanderbricks_Q4" src="https://github.com/user-attachments/assets/74e83e22-e21d-4b9f-8d93-e3d4c42bb67b" />
+
 
 ---
 
-### 🔹 Q5: Properties Missing Amenities
-Identifies listings that have:
-- No rows in `property_amenities` (no amenities assigned)
 
-**Purpose:** Flag incomplete listings that may hurt search ranking, guest trust, and conversion rates.
-
-```sql
-SELECT
-    p.property_id,
-    p.title,
-    p.destination_id
-FROM samples.wanderbricks.properties              AS p
-LEFT JOIN samples.wanderbricks.property_amenities AS pa
-    ON p.property_id = pa.property_id
-WHERE pa.property_id IS NULL
-ORDER BY p.property_id;
-```
-
-**Explanation:** Classic anti-join pattern — LEFT JOIN retains all properties; `WHERE pa.property_id IS NULL` isolates those with no match in the bridge table. These listings need amenities assigned before going live.
-
-<!-- Add screenshot here -->
-
----
-
-### 🔹 Q6: Top Amenity Categories per Property
+### 🔹 Q5: Top  Amenity Categories per Property
 Ranks:
 - Amenity categories by how often they appear per property
 - Using `DENSE_RANK()` so tied categories share the same rank
@@ -279,28 +260,26 @@ Ranks:
 **Purpose:** Reveal which amenity categories are most common — informs search filters and host guidance on what guests expect most.
 
 ```sql
-SELECT
-    b.property_id,
-    a.category,
-    DENSE_RANK() OVER (
-        PARTITION BY b.property_id
-        ORDER BY COUNT(*) DESC
-    )               AS ranking,
-    COUNT(*)        AS count_frequency
-FROM samples.wanderbricks.amenities          AS a
-JOIN samples.wanderbricks.property_amenities AS b
-    ON a.amenity_id = b.amenity_id
-GROUP BY b.property_id, a.category
-ORDER BY b.property_id, ranking;
+select 
+property_id
+,category
+,dense_rank() over(partition by b.property_id order by count(*) desc) ranking
+,count(*) as count_frequency
+from samples.wanderbricks.amenities a
+join samples.wanderbricks.property_amenities b
+on a.amenity_id = b.amenity_id
+group by b.property_id, category
+order by property_id, ranking
 ```
 
 **Explanation:** Groups by property and category to count amenity frequency, then applies `DENSE_RANK()` so the most-common category per property = rank 1. Unlike `RANK()`, `DENSE_RANK()` produces no gaps when categories tie.
 
-<!-- Add screenshot here -->
+<img width="445" height="365" alt="wanderbricks_Q5" src="https://github.com/user-attachments/assets/b6e02db7-bd4b-42c0-8011-21a81715b758" />
+
 
 ---
 
-### 🔹 Q7: Primary Image Audit
+### 🔹 Q6: Primary Image Audit
 Ensures each property has:
 - Exactly one `is_primary = TRUE` image
 
@@ -312,34 +291,36 @@ Classifies each property as:
 **Purpose:** Prevent broken thumbnails and ambiguous display states across the platform.
 
 ```sql
-WITH image_counts AS (
-    SELECT
-        property_id,
-        SUM(CASE WHEN is_primary = TRUE THEN 1 ELSE 0 END) AS primary_count,
-        COUNT(*)                                            AS total_images
-    FROM samples.wanderbricks.property_images
-    GROUP BY property_id
+with image_counts as (
+select
+property_id
+,sum(case when is_primary = true then 1 else 0 end) as primary_count
+,count(*) as total_images
+from samples.wanderbricks.property_images
+group by property_id
 )
-SELECT
-    ic.property_id,
-    ic.total_images,
-    ic.primary_count,
-    CASE
-        WHEN ic.primary_count = 0 THEN 'Missing primary image'
-        WHEN ic.primary_count = 1 THEN 'Valid'
-        ELSE                          'Multiple primary images'
-    END AS image_status
-FROM image_counts AS ic
-ORDER BY ic.primary_count, ic.property_id;
+
+select
+ic.property_id
+,ic.total_images
+,ic.primary_count
+,case
+when ic.primary_count = 0 then 'Missing primary image'
+when ic.primary_count = 1 then 'Valid'
+else 'Multiple primary images'
+end as image_status
+from image_counts ic
+order by ic.primary_count, ic.property_id
 ```
 
 **Explanation:** CTE pre-aggregates primary image counts per property. The CASE expression in the main query then classifies each property into one of three audit states — rows where `image_status != 'Valid'` are remediation targets.
 
-<!-- Add screenshot here -->
+<img width="467" height="362" alt="wanderbricks_Q6" src="https://github.com/user-attachments/assets/56da04cc-32b0-47b8-9940-c0e8bd6ffa7c" />
+
 
 ---
 
-### 🔹 Q8: Destination Coverage
+### 🔹 Q7: Destination Coverage
 Counts:
 - Number of properties per destination
 - Enriched with country and continent from reference tables
@@ -347,73 +328,84 @@ Counts:
 **Purpose:** Geographic inventory view to identify underserved markets and guide host acquisition strategy.
 
 ```sql
-WITH property_counts AS (
-    SELECT
-        d.destination_id,
-        d.destination,
-        d.country,
-        d.state_or_province,
-        COUNT(p.property_id) AS property_count
-    FROM samples.wanderbricks.destinations AS d
-    LEFT JOIN samples.wanderbricks.properties AS p
-        ON d.destination_id = p.destination_id
-    GROUP BY d.destination_id, d.destination, d.country, d.state_or_province
+with property_counts as (
+select
+d.destination_id
+,d.destination
+,d.country
+,d.state_or_province
+,count(p.property_id) as property_count
+from samples.wanderbricks.destinations d
+left join samples.wanderbricks.properties p
+on d.destination_id = p.destination_id
+group by
+d.destination_id, d.destination,d.country, d.state_or_province
 )
-SELECT
-    pc.destination_id,
-    pc.destination,
-    pc.country,
-    c.continent,
-    pc.state_or_province,
-    pc.property_count
-FROM property_counts AS pc
-LEFT JOIN samples.wanderbricks.countries AS c
-    ON pc.country = c.country
-ORDER BY pc.property_count DESC;
+select
+pc.destination_id
+,pc.destination
+,pc.country
+,c.continent
+,pc.state_or_province
+,pc.property_count
+from property_counts pc
+left join samples.wanderbricks.countries c
+on pc.country = c.country
+order by pc.property_count desc
 ```
 
 **Explanation:** Double LEFT JOIN preserves destinations with zero properties (registered markets with no supply) and destinations whose country has no entry in the countries table. Both are strategically important gaps to surface.
 
-<!-- Add screenshot here -->
+<img width="682" height="361" alt="wanderbricks_Q7" src="https://github.com/user-attachments/assets/448317f1-b4a1-457b-a968-02781ce5800c" />
+
 
 ---
 
-### 🔹 Q9: Country Property Density
+### 🔹 Q8: Country Property Density
 Ranks:
 - Countries by total number of properties listed
 
 **Purpose:** Country-level supply view to prioritize business development and host recruitment in underserved markets.
 
 ```sql
-WITH property_count AS (
-    SELECT
-        COUNT(property_id) AS pcount,
-        destination_id,
-        title
-    FROM samples.wanderbricks.properties
-    GROUP BY ALL
-),
-countries AS (
-    SELECT destination_id, country
-    FROM samples.wanderbricks.destinations
+with property_count as
+(
+
+select 
+count(property_id) as pcount
+,destination_id
+,title
+from samples.wanderbricks.properties
+group by all
 )
-SELECT
-    SUM(pc.pcount) AS number_of_properties,
-    c.country
-FROM property_count AS pc
-JOIN countries      AS c
-    ON pc.destination_id = c.destination_id
-GROUP BY ALL
-ORDER BY number_of_properties DESC;
+,
+countries as
+(
+select 
+destination_id
+,country
+from samples.wanderbricks.destinations
+
+)
+select 
+sum(pc.pcount) as number_of_properties
+-- ,c.destination_id
+,c.country
+from property_count pc
+join countries c
+on pc.destination_id = c.destination_id
+group by all
+order by number_of_properties desc
 ```
 
 **Explanation:** Two-CTE pattern — first counts properties per destination, then re-aggregates by country to sum across all destinations within each nation. Produces a clean country-level supply leaderboard.
 
-<!-- Add screenshot here -->
+<img width="300" height="363" alt="wanderbricks_Q8" src="https://github.com/user-attachments/assets/13cf2eed-7466-40b6-bc58-dac0eaf5ab29" />
+
 
 ---
 
-### 🔹 Q10: Business vs. Individual Spend
+### 🔹 Q9: Business vs. Individual Spend
 Compares:
 - Average booking revenue for `is_business = TRUE` accounts
 - vs. `is_business = FALSE` accounts
@@ -422,24 +414,25 @@ Compares:
 **Purpose:** Quantify the B2B revenue premium to inform corporate pricing strategy and sales team priorities.
 
 ```sql
-SELECT
-    b.is_business,
-    ROUND(AVG(a.total_amount), 2) AS avg_total_amount
-FROM samples.wanderbricks.bookings AS a
-JOIN samples.wanderbricks.users    AS b
-    ON a.user_id = b.user_id
-WHERE a.status = 'completed'
-GROUP BY b.is_business
-ORDER BY b.is_business DESC;
+select 
+b.is_business,
+avg(a.total_amount) as avg_total_amount
+from samples.wanderbricks.bookings a
+join samples.wanderbricks.users b
+on a.user_id = b.user_id
+where a.status = 'completed'
+group by b.is_business
+order by b.is_business desc
 ```
 
 **Explanation:** Joins bookings to users on `user_id` and segments by the boolean `is_business` flag. Filtering `WHERE status = 'completed'` ensures only realized revenue is measured — cancellations and pending bookings are excluded.
 
-<!-- Add screenshot here -->
+<img width="272" height="98" alt="wanderbricks_Q9" src="https://github.com/user-attachments/assets/1662cc88-e6be-4c6e-bd6b-64fb640fec0d" />
+
 
 ---
 
-### 🔹 Q11: Host Performance
+### 🔹 Q10: Host Performance
 Calculates:
 - Running average rating per host
 - Ordered from highest to lowest rating
@@ -447,24 +440,20 @@ Calculates:
 **Purpose:** Score host quality for Superhost tiering programs and identify low-performing hosts who need coaching.
 
 ```sql
-SELECT
-    a.name,
-    ROUND(
-        AVG(a.rating) OVER (
-            PARTITION BY a.name
-            ORDER BY a.rating DESC
-        ), 2
-    ) AS avg_rating
-FROM samples.wanderbricks.hosts AS a;
+select 
+a.name
+,round(avg(a.rating) over(partition by name order by rating desc),2) as avg_rating
+from samples.wanderbricks.hosts a
 ```
 
 **Explanation:** Window function `AVG() OVER (PARTITION BY name ORDER BY rating DESC)` computes a running cumulative average per host, starting at their highest rating. For a simple single-number average per host, use `GROUP BY name` with `AVG(rating)` instead.
 
-<!-- Add screenshot here -->
+<img width="292" height="360" alt="wanderbricks_Q10" src="https://github.com/user-attachments/assets/fd2ef79a-8529-408f-8ac7-1ec27202dbd3" />
+
 
 ---
 
-### 🔹 Q12: Refund Detection
+### 🔹 Q11: Refund Detection
 Finds bookings that have:
 - A `completed` payment AND a `refunded` payment
 
@@ -472,108 +461,115 @@ Finds bookings that have:
 
 ```sql
 -- Summary: which booking_ids have both statuses?
-SELECT
-    booking_id
-FROM samples.wanderbricks.payments
-WHERE status IN ('completed', 'refunded')
-GROUP BY booking_id
-HAVING COUNT(DISTINCT status) = 2;
-
--- Detail: full payment rows for flagged bookings
-SELECT
-    booking_id,
-    amount,
-    status
-FROM samples.wanderbricks.payments
-WHERE status IN ('completed', 'refunded')
-  AND booking_id IN (
-      SELECT booking_id
-      FROM   samples.wanderbricks.payments
-      WHERE  status IN ('completed', 'refunded')
-      GROUP BY booking_id
-      HAVING COUNT(DISTINCT status) = 2
-  )
-ORDER BY booking_id, status;
+select 
+booking_id
+,amount
+,status
+from samples.wanderbricks.payments
+where status in ('completed','refunded')
+and booking_id in (
+select booking_id
+from samples.wanderbricks.payments
+where status in ('completed','refunded')
+group by booking_id
+having count(distinct status) = 2
+)
+order by booking_id, status
 ```
 
 **Explanation:** `HAVING COUNT(DISTINCT status) = 2` is the core logic — a booking_id only qualifies if both 'completed' and 'refunded' statuses exist for it. The detail query then surfaces full payment rows so original and refund amounts appear side by side for audit.
 
-<!-- Add screenshot here -->
+<img width="311" height="367" alt="wanderbricks_Q11" src="https://github.com/user-attachments/assets/0249b807-3bb7-426a-ad99-e2be89894d8a" />
+
+
 
 ---
 
-### 🔹 Q13: Payment Lag
+### 🔹 Q12: Payment Lag
 Calculates:
 - Days between `booking_updates.created_at` and `payments.payment_date`
 
 **Purpose:** Measure payment processing delays to detect billing friction, slow invoicing, or pipeline bottlenecks.
 
 ```sql
-SELECT DISTINCT
-    a.booking_id,
-    CAST(a.created_at   AS DATE) AS booking_created_date,
-    CAST(b.payment_date AS DATE) AS payment_date,
-    DATEDIFF(b.payment_date, a.created_at) AS days_between
-FROM samples.wanderbricks.booking_updates AS a
-JOIN samples.wanderbricks.payments        AS b
-    ON a.booking_id = b.booking_id
-ORDER BY a.created_at ASC;
+select distinct
+a.booking_id
+,cast(a.created_at as date)
+,cast(b.payment_date as date)
+,datediff(b.payment_date, a.created_at) as days_between
+from samples.wanderbricks.booking_updates a
+join samples.wanderbricks.payments b
+on a.booking_id = b.booking_id
+order by created_at asc
 ```
 
 **Explanation:** Both timestamps are CAST to DATE to normalize any time component before computing the difference. A negative `days_between` means payment was logged before the booking update — a data ordering anomaly worth investigating.
 
-<!-- Add screenshot here -->
+<img width="472" height="361" alt="wanderbricks_Q12" src="https://github.com/user-attachments/assets/165fe34a-84b2-44de-b782-c84248f35a7c" />
+
 
 ---
 
-### 🔹 Q14: User Funnel Analysis
+### 🔹 Q13: User Funnel Analysis
 Calculates conversion rates across:
 - View → Click → Search → Booking
 
 **Purpose:** Pinpoint where users drop off in the booking journey to prioritize UX improvements and A/B test targets.
 
 ```sql
-WITH events AS (
-    SELECT user_id, event, MIN(timestamp) AS first_event
-    FROM samples.wanderbricks.clickstream
-    GROUP BY user_id, event
+with events as (
+select 
+user_id
+,event
+,min(timestamp) as first_event
+from samples.wanderbricks.clickstream
+group by user_id, event
 ),
-funnel AS (
-    SELECT
-        e.user_id,
-        MAX(CASE WHEN e.event = 'view'   THEN 1 ELSE 0 END) AS viewed,
-        MAX(CASE WHEN e.event = 'click'  THEN 1 ELSE 0 END) AS clicked,
-        MAX(CASE WHEN e.event = 'search' THEN 1 ELSE 0 END) AS searched,
-        CASE WHEN b.booking_id IS NOT NULL THEN 1 ELSE 0 END AS booked
-    FROM events AS e
-    LEFT JOIN samples.wanderbricks.bookings AS b ON e.user_id = b.user_id
-    GROUP BY e.user_id, b.booking_id
+
+funnel as (
+select
+e.user_id
+,max(case when e.event = 'view' then 1 else 0 end) as viewed
+,max(case when e.event = 'click' then 1 else 0 end) as clicked
+,max(case when e.event = 'search' then 1 else 0 end) as searched
+,case when b.booking_id is not null then 1 else 0 end as booked
+from events e
+left join samples.wanderbricks.bookings b
+on e.user_id = b.user_id
+group by e.user_id, b.booking_id
 ),
-aggregation AS (
-    SELECT
-        COUNT(*)        AS total_users,
-        SUM(viewed)     AS total_views,
-        SUM(clicked)    AS total_clicks,
-        SUM(searched)   AS total_searches,
-        SUM(booked)     AS total_bookings
-    FROM funnel
+
+aggregation as (
+select
+count(*) as total_users
+,sum(viewed) as total_views
+,sum(clicked) as total_clicks
+,sum(searched) as total_searches
+,sum(booked) as total_bookings
+from funnel
 )
-SELECT
-    total_views, total_clicks, total_searches, total_bookings, total_users,
-    ROUND((total_views    / total_users) * 100, 2) AS pct_viewed,
-    ROUND((total_clicks   / total_users) * 100, 2) AS pct_clicked,
-    ROUND((total_searches / total_users) * 100, 2) AS pct_searched,
-    ROUND((total_bookings / total_users) * 100, 2) AS pct_booked
-FROM aggregation;
+
+select
+total_views
+,total_clicks
+,total_searches
+,total_bookings
+,total_users
+,round((total_views/total_users)*100,2) as pct_viewed
+,round((total_clicks/total_users)*100,2) as pct_clicked
+,round((total_searches/total_users)*100,2) as pct_searched
+,round((total_bookings/total_users)*100,2) as pct_booked
+from aggregation
 ```
 
 **Explanation:** Three-CTE pipeline — `events` collapses clickstream to one row per user/event, `funnel` pivots events into binary flags using `MAX(CASE WHEN)`, and `aggregation` sums them to produce platform-wide totals before the final SELECT computes percentage rates.
 
-<!-- Add screenshot here -->
+<img width="967" height="78" alt="wanderbricks_Q13" src="https://github.com/user-attachments/assets/c1e534d2-975c-4f37-8c68-98b215e70c25" />
+
 
 ---
 
-### 🔹 Q15: Device & Channel Performance
+### 🔹 Q14: Device & Channel Performance
 Counts engagement by:
 - Device type: desktop, mobile, tablet
 - Referrer channel: ad, direct, email, google
@@ -581,27 +577,27 @@ Counts engagement by:
 **Purpose:** Allocate marketing spend and inform responsive design priorities based on where users actually come from.
 
 ```sql
-SELECT
-    SUM(CASE WHEN b.device_type = 'desktop' THEN 1 ELSE 0 END) AS total_desktop,
-    SUM(CASE WHEN b.device_type = 'mobile'  THEN 1 ELSE 0 END) AS total_mobile,
-    SUM(CASE WHEN b.device_type = 'tablet'  THEN 1 ELSE 0 END) AS total_tablet,
-    SUM(CASE WHEN b.referrer   = 'ad'       THEN 1 ELSE 0 END) AS total_ad,
-    SUM(CASE WHEN b.referrer   = 'direct'   THEN 1 ELSE 0 END) AS total_direct,
-    SUM(CASE WHEN b.referrer   = 'email'    THEN 1 ELSE 0 END) AS total_email,
-    SUM(CASE WHEN b.referrer   = 'google'   THEN 1 ELSE 0 END) AS total_google_search
-FROM samples.wanderbricks.clickstream AS a
-LEFT JOIN samples.wanderbricks.page_views AS b
-    ON a.user_id = b.user_id
-GROUP BY ALL;
+select 
+sum(case when b.device_type = 'desktop' then 1 else 0 end) as total_desktop
+,sum(case when b.device_type = 'mobile' then 1 else 0 end) as total_mobile
+,sum(case when b.device_type = 'tablet' then 1 else 0 end) as total_tablet
+,sum(case when b.referrer = 'ad' then 1 else 0 end) as total_ad
+,sum(case when b.referrer = 'direct' then 1 else 0 end) as total_direct
+,sum(case when b.referrer = 'email' then 1 else 0 end) as total_email
+,sum(case when b.referrer = 'google' then 1 else 0 end) total_google_search
+from samples.wanderbricks.clickstream a
+left join samples.wanderbricks.page_views b
+on a.user_id = b.user_id
 ```
 
 **Explanation:** Conditional aggregation pivots categorical values into separate numeric columns in a single pass — more efficient than multiple filtered subqueries. The LEFT JOIN preserves all clickstream users even if they have no page_view record.
 
-<!-- Add screenshot here -->
+<img width="772" height="76" alt="wanderbricks_Q14" src="https://github.com/user-attachments/assets/6914d716-5888-430e-bb92-7dfd324e0471" />
+
 
 ---
 
-### 🔹 Q16: Extract Latest Support Message
+### 🔹 Q15: Extract Latest Support Message
 Unnests the `messages[]` array and returns:
 - The most recent message per support ticket
 
@@ -640,7 +636,7 @@ ORDER BY ticket_id ASC;
 
 ---
 
-### 🔹 Q17: Support Message Sentiment Analysis
+### 🔹 Q16: Support Message Sentiment Analysis
 Extracts from each message string:
 - `reporter` — who sent the message (agent or user)
 - `mood` — sentiment label (angry, caring, helpful, etc.)
@@ -678,7 +674,7 @@ ORDER BY ticket_id ASC;
 
 ---
 
-### 🔹 Q18: Conversation Duration
+### 🔹 Q17: Conversation Duration
 Calculates:
 - Days between first and last message in each support ticket
 
@@ -721,7 +717,7 @@ ORDER BY a.ticket_id;
 
 ---
 
-### 🔹 Q19: Top 3 Properties per Destination
+### 🔹 Q18: Top 3 Properties per Destination
 Ranks properties within each destination:
 - By guest rating using `ROW_NUMBER()`
 - Returns top 3 per destination only
@@ -754,7 +750,7 @@ ORDER BY b.destination ASC, rank ASC;
 
 ---
 
-### 🔹 Q20: Low Rating Root Causes
+### 🔹 Q19: Low Rating Root Causes
 Joins reviews under 3 stars to properties and destinations to:
 - Surface repeated complaint patterns
 - Count frequency of the same comment across the same property and destination
